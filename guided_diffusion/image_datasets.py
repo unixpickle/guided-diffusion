@@ -1,11 +1,17 @@
-import math
-import random
+"""
+Corgi data loading, mostly borrowed from:
+https://github.com/unixpickle/corgi-net/blob/0c31e0fe82e94f3b85c06654175cc1c03575ff3c/python-corgi-net/python_corgi_net/pytorch_data.py
+"""
+
+import json
+import os
+from typing import Any, Dict, Optional, Tuple
 
 from PIL import Image
-import blobfile as bf
-from mpi4py import MPI
-import numpy as np
-from torch.utils.data import DataLoader, Dataset
+import torch as th
+from torch.utils.data import Dataset, DataLoader
+from torchvision.datasets.utils import download_and_extract_archive
+import torchvision.transforms as transforms
 
 
 def load_data(
@@ -18,150 +24,160 @@ def load_data(
     random_crop=False,
     random_flip=True,
 ):
-    """
-    For a dataset, create a generator over (images, kwargs) pairs.
-
-    Each images is an NCHW float tensor, and the kwargs dict contains zero or
-    more keys, each of which map to a batched Tensor of their own.
-    The kwargs dict can be used for class labels, in which case the key is "y"
-    and the values are integer tensors of class labels.
-
-    :param data_dir: a dataset directory.
-    :param batch_size: the batch size of each returned pair.
-    :param image_size: the size to which images are resized.
-    :param class_cond: if True, include a "y" key in returned dicts for class
-                       label. If classes are not available and this is true, an
-                       exception will be raised.
-    :param deterministic: if True, yield results in a deterministic order.
-    :param random_crop: if True, randomly crop the images for augmentation.
-    :param random_flip: if True, randomly flip the images for augmentation.
-    """
-    if not data_dir:
-        raise ValueError("unspecified data directory")
-    all_files = _list_image_files_recursively(data_dir)
-    classes = None
-    if class_cond:
-        # Assume classes are the first part of the filename,
-        # before an underscore.
-        class_names = [bf.basename(path).split("_")[0] for path in all_files]
-        sorted_classes = {x: i for i, x in enumerate(sorted(set(class_names)))}
-        classes = [sorted_classes[x] for x in class_names]
-    dataset = ImageDataset(
-        image_size,
-        all_files,
-        classes=classes,
-        shard=MPI.COMM_WORLD.Get_rank(),
-        num_shards=MPI.COMM_WORLD.Get_size(),
-        random_crop=random_crop,
-        random_flip=random_flip,
+    dataset = CroppedCorgiNetDataset(
+        data_dir,
+        transform=transforms.Compose(
+            [
+                transforms.Resize(int(image_size * 1.1)),
+                transforms.RandomCrop(image_size),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+            ]
+        ),
     )
-    if deterministic:
-        loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=False, num_workers=1, drop_last=True
-        )
-    else:
-        loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=True, num_workers=1, drop_last=True
-        )
-    while True:
-        yield from loader
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=1)
+    for x in loader:
+        yield x * 2 - 1, dict(y=th.tensor([263] * batch_size).long())
 
 
-def _list_image_files_recursively(data_dir):
-    results = []
-    for entry in sorted(bf.listdir(data_dir)):
-        full_path = bf.join(data_dir, entry)
-        ext = entry.split(".")[-1]
-        if "." in entry and ext.lower() in ["jpg", "jpeg", "png", "gif"]:
-            results.append(full_path)
-        elif bf.isdir(full_path):
-            results.extend(_list_image_files_recursively(full_path))
-    return results
+class CorgiNetDataset(Dataset):
+    """
+    A dataset of corgi images and corresponding metadata.
 
+    Items in this dataset are tuples of the form (image, crops), where `image`
+    is a PIL image, and `crops` is a dict describing which square regions of
+    the image are most likely to contain a corgi.
 
-class ImageDataset(Dataset):
+    The crops dicts contain "scores" and "bboxes" keys. The "scores" entry is a
+    list of floating point probabilities representing corgi predictions, and
+    the "bboxes" entry is a list of (x, y, width, height) crop regions which
+    correspond to each score. Note that the coordinates and sizes are floats
+    and you will likely want to round them before cropping.
+
+    :param data_dir: the directory containing the dataset files.
+    :param split: the split of the dataset to use, ("train" or "test").
+    :param download: if True and the split directory does not exist, download
+                     it from the internet.
+    """
+
     def __init__(
         self,
-        resolution,
-        image_paths,
-        classes=None,
-        shard=0,
-        num_shards=1,
-        random_crop=False,
-        random_flip=True,
+        data_dir: str,
+        split: str = "train",
+        download: bool = True,
+    ):
+        if split not in ["train", "test"]:
+            raise ValueError(f"unknown split: {split}")
+        self.data_dir = data_dir
+        self.images_dir = os.path.join(self.data_dir, "images")
+        self.crops_path = os.path.join(self.data_dir, "crops.json")
+        self.split = split
+
+        if not os.path.exists(data_dir):
+            os.mkdir(data_dir)
+
+        if not os.path.exists(self.crops_path):
+            if not download:
+                raise FileNotFoundError(f"crop metadata not found: {self.crops_path}")
+            data_url = f"https://data.aqnichol.com/corgi-net/crops.json.gz"
+            download_and_extract_archive(
+                data_url,
+                self.data_dir,
+                self.data_dir,
+                filename=f"crops.json.gz",
+                remove_finished=True,
+            )
+
+        if not os.path.exists(self.images_dir):
+            if not download:
+                raise FileNotFoundError(f"image directory not found: {self.images_dir}")
+            data_url = f"https://data.aqnichol.com/corgi-net/images.tar"
+            download_and_extract_archive(
+                data_url,
+                self.data_dir,
+                self.images_dir,
+                filename=f"images.tar",
+                remove_finished=True,
+            )
+
+        with open(self.crops_path, "rt") as f:
+            self.crops = json.load(f)
+
+        self.image_hashes = sorted(self.crops.keys())
+        if split == "train":
+            self.image_hashes = self.image_hashes[1000:]
+        else:
+            self.image_hashes = self.image_hashes[:1000]
+
+    def __len__(self) -> int:
+        return len(self.image_hashes)
+
+    def __getitem__(self, idx: int) -> Tuple[Any, Dict[str, Any]]:
+        hash = self.image_hashes[idx]
+        img = Image.open(os.path.join(self.images_dir, f"{hash}.jpg"))
+        crop_info = self.crops[hash].copy()
+        crop_info["bboxes"] = [tuple(x) for x in crop_info["bboxes"]]
+        return img, self.crops[hash]
+
+
+class CroppedCorgiNetDataset(Dataset):
+    """
+    This dataset is similar to CorgiNetDataset, but it automatically crops the
+    images and filters out crops with low corgi probabilities.
+
+    The items in this dataset are simply PIL images, with no provided crop
+    information. Multiple items in the dataset may correspond to the same
+    image, but capture different crops of it.
+
+    :param data_dir: the directory containing the dataset files.
+    :param split: the split of the dataset to use, ("train" or "test").
+    :param download: if True and the split directory does not exist, download
+                     it from the internet.
+    :param min_prob: the minimum corgi probability for a crop to be allowed to
+                     enter the dataset.
+    :param transform: if specified, a function to apply to each cropped image.
+    """
+
+    def __init__(
+        self,
+        data_dir: str,
+        split: str = "train",
+        download: bool = True,
+        min_prob: float = 0.05,
+        transform: Optional[Any] = None,
     ):
         super().__init__()
-        self.resolution = resolution
-        self.local_images = image_paths[shard:][::num_shards]
-        self.local_classes = None if classes is None else classes[shard:][::num_shards]
-        self.random_crop = random_crop
-        self.random_flip = random_flip
 
-    def __len__(self):
-        return len(self.local_images)
-
-    def __getitem__(self, idx):
-        path = self.local_images[idx]
-        with bf.BlobFile(path, "rb") as f:
-            pil_image = Image.open(f)
-            pil_image.load()
-        pil_image = pil_image.convert("RGB")
-
-        if self.random_crop:
-            arr = random_crop_arr(pil_image, self.resolution)
-        else:
-            arr = center_crop_arr(pil_image, self.resolution)
-
-        if self.random_flip and random.random() < 0.5:
-            arr = arr[:, ::-1]
-
-        arr = arr.astype(np.float32) / 127.5 - 1
-
-        out_dict = {}
-        if self.local_classes is not None:
-            out_dict["y"] = np.array(self.local_classes[idx], dtype=np.int64)
-        return np.transpose(arr, [2, 0, 1]), out_dict
-
-
-def center_crop_arr(pil_image, image_size):
-    # We are not on a new enough PIL to support the `reducing_gap`
-    # argument, which uses BOX downsampling at powers of two first.
-    # Thus, we do it by hand to improve downsample quality.
-    while min(*pil_image.size) >= 2 * image_size:
-        pil_image = pil_image.resize(
-            tuple(x // 2 for x in pil_image.size), resample=Image.BOX
+        self.base_dataset = CorgiNetDataset(
+            data_dir=data_dir,
+            split=split,
+            download=download,
         )
+        self.min_prob = min_prob
+        self.transform = transform
 
-    scale = image_size / min(*pil_image.size)
-    pil_image = pil_image.resize(
-        tuple(round(x * scale) for x in pil_image.size), resample=Image.BICUBIC
-    )
+        self.crop_pairs = []
+        for i, hash in enumerate(self.base_dataset.image_hashes):
+            crop_info = self.base_dataset.crops[hash]
+            for score, bbox in zip(crop_info["scores"], crop_info["bboxes"]):
+                if score >= min_prob:
+                    self.crop_pairs.append((i, tuple(int(x) for x in bbox)))
+        self._used_images = len(set(i for i, _ in self.crop_pairs))
 
-    arr = np.array(pil_image)
-    crop_y = (arr.shape[0] - image_size) // 2
-    crop_x = (arr.shape[1] - image_size) // 2
-    return arr[crop_y : crop_y + image_size, crop_x : crop_x + image_size]
+    def used_images(self) -> int:
+        """
+        Get the number of unique images for which some crop satisfied the
+        minimum corgi probability threshold.
+        """
+        return self._used_images
 
+    def __len__(self) -> int:
+        return len(self.crop_pairs)
 
-def random_crop_arr(pil_image, image_size, min_crop_frac=0.8, max_crop_frac=1.0):
-    min_smaller_dim_size = math.ceil(image_size / max_crop_frac)
-    max_smaller_dim_size = math.ceil(image_size / min_crop_frac)
-    smaller_dim_size = random.randrange(min_smaller_dim_size, max_smaller_dim_size + 1)
-
-    # We are not on a new enough PIL to support the `reducing_gap`
-    # argument, which uses BOX downsampling at powers of two first.
-    # Thus, we do it by hand to improve downsample quality.
-    while min(*pil_image.size) >= 2 * smaller_dim_size:
-        pil_image = pil_image.resize(
-            tuple(x // 2 for x in pil_image.size), resample=Image.BOX
-        )
-
-    scale = smaller_dim_size / min(*pil_image.size)
-    pil_image = pil_image.resize(
-        tuple(round(x * scale) for x in pil_image.size), resample=Image.BICUBIC
-    )
-
-    arr = np.array(pil_image)
-    crop_y = random.randrange(arr.shape[0] - image_size + 1)
-    crop_x = random.randrange(arr.shape[1] - image_size + 1)
-    return arr[crop_y : crop_y + image_size, crop_x : crop_x + image_size]
+    def __getitem__(self, idx: int) -> Any:
+        base_index, (x, y, w, h) = self.crop_pairs[idx]
+        base_image, _ = self.base_dataset[base_index]
+        out_image = base_image.crop(box=(x, y, x + w, y + h))
+        if self.transform:
+            out_image = self.transform(out_image)
+        return out_image

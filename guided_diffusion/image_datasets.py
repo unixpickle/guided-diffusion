@@ -35,9 +35,10 @@ def load_data(
             ]
         ),
     )
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=1)
-    for x in loader:
-        yield x * 2 - 1, dict(y=th.tensor([263] * batch_size).long())
+    while True:
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=1)
+        for x in loader:
+            yield x * 2 - 1, dict(y=th.tensor([263] * batch_size).long())
 
 
 class CorgiNetDataset(Dataset):

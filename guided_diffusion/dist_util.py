@@ -7,7 +7,8 @@ import os
 import socket
 
 import blobfile as bf
-from mpi4py import MPI
+
+# from mpi4py import MPI
 import torch as th
 import torch.distributed as dist
 
@@ -22,6 +23,7 @@ def setup_dist():
     """
     Setup a distributed process group.
     """
+    return
     if dist.is_initialized():
         return
     os.environ["CUDA_VISIBLE_DEVICES"] = f"{MPI.COMM_WORLD.Get_rank() % GPUS_PER_NODE}"
@@ -55,6 +57,7 @@ def load_state_dict(path, **kwargs):
     """
     Load a PyTorch file without redundant fetches across MPI ranks.
     """
+    return th.load(path, **kwargs)
     chunk_size = 2 ** 30  # MPI has a relatively small size limit
     if MPI.COMM_WORLD.Get_rank() == 0:
         with bf.BlobFile(path, "rb") as f:
@@ -78,6 +81,7 @@ def sync_params(params):
     """
     Synchronize a sequence of Tensors across ranks from rank 0.
     """
+    return
     for p in params:
         with th.no_grad():
             dist.broadcast(p, 0)

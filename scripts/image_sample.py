@@ -9,14 +9,13 @@ import os
 import numpy as np
 import torch as th
 import torch.distributed as dist
-
 from guided_diffusion import dist_util, logger
 from guided_diffusion.script_util import (
     NUM_CLASSES,
-    model_and_diffusion_defaults,
-    create_model_and_diffusion,
     add_dict_to_argparser,
     args_to_dict,
+    create_model_and_diffusion,
+    model_and_diffusion_defaults,
 )
 
 
@@ -44,9 +43,7 @@ def main():
     while len(all_images) * args.batch_size < args.num_samples:
         model_kwargs = {}
         if args.class_cond:
-            classes = th.randint(
-                low=0, high=NUM_CLASSES, size=(args.batch_size,), device=dist_util.dev()
-            )
+            classes = th.tensor([263] * args.batch_size, device=dist_util.dev())
             model_kwargs["y"] = classes
         sample_fn = (
             diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop

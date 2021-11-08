@@ -29,9 +29,7 @@ def main():
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
     )
-    model.load_state_dict(
-        dist_util.load_state_dict(args.model_path, map_location="cpu")
-    )
+    model.load_state_dict(th.load(args.model_path, map_location="cpu"))
     model.to(dist_util.dev())
     if args.use_fp16:
         model.convert_to_fp16()
@@ -58,14 +56,10 @@ def main():
         sample = sample.permute(0, 2, 3, 1)
         sample = sample.contiguous()
 
-        gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
-        dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
+        gathered_samples = [sample]
         all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
         if args.class_cond:
-            gathered_labels = [
-                th.zeros_like(classes) for _ in range(dist.get_world_size())
-            ]
-            dist.all_gather(gathered_labels, classes)
+            gathered_labels = [classes]
             all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
         logger.log(f"created {len(all_images) * args.batch_size} samples")
 
@@ -74,7 +68,7 @@ def main():
     if args.class_cond:
         label_arr = np.concatenate(all_labels, axis=0)
         label_arr = label_arr[: args.num_samples]
-    if dist.get_rank() == 0:
+    if True:  # dist.get_rank() == 0:
         shape_str = "x".join([str(x) for x in arr.shape])
         out_path = os.path.join(logger.get_dir(), f"samples_{shape_str}.npz")
         logger.log(f"saving to {out_path}")
@@ -83,7 +77,7 @@ def main():
         else:
             np.savez(out_path, arr)
 
-    dist.barrier()
+    # dist.barrier()
     logger.log("sampling complete")
 
 

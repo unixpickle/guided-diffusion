@@ -69,9 +69,7 @@ def main():
     all_labels = []
     while len(all_images) * args.batch_size < args.num_samples:
         model_kwargs = {}
-        classes = th.randint(
-            low=0, high=NUM_CLASSES, size=(args.batch_size,), device=dist_util.dev()
-        )
+        classes = th.tensor([263] * args.batch_size, device=dist_util.dev())
         model_kwargs["y"] = classes
         sample_fn = (
             diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop
@@ -88,11 +86,11 @@ def main():
         sample = sample.permute(0, 2, 3, 1)
         sample = sample.contiguous()
 
-        gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
-        dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
+        gathered_samples = [sample]
+        # dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
         all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
-        gathered_labels = [th.zeros_like(classes) for _ in range(dist.get_world_size())]
-        dist.all_gather(gathered_labels, classes)
+        gathered_labels = [classes]
+        #dist.all_gather(gathered_labels, classes)
         all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
         logger.log(f"created {len(all_images) * args.batch_size} samples")
 
@@ -100,13 +98,13 @@ def main():
     arr = arr[: args.num_samples]
     label_arr = np.concatenate(all_labels, axis=0)
     label_arr = label_arr[: args.num_samples]
-    if dist.get_rank() == 0:
+    if True:
         shape_str = "x".join([str(x) for x in arr.shape])
         out_path = os.path.join(logger.get_dir(), f"samples_{shape_str}.npz")
         logger.log(f"saving to {out_path}")
         np.savez(out_path, arr, label_arr)
 
-    dist.barrier()
+    # dist.barrier()
     logger.log("sampling complete")
 
 
